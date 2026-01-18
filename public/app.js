@@ -534,7 +534,13 @@ function renderUserList() {
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'user-name';
-    nameSpan.textContent = user.name + (user.id === myUserId ? ' (you)' : '');
+
+    // Build display name with location
+    let displayText = user.name + (user.id === myUserId ? ' (you)' : '');
+    if (user.location) {
+      displayText += ` • ${user.location}`;
+    }
+    nameSpan.textContent = displayText;
 
     li.appendChild(nameSpan);
 

@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const { nanoid } = require('nanoid');
+const geoip = require('geoip-lite');
 
 const app = express();
 const server = http.createServer(app);
@@ -39,10 +40,35 @@ function getRoomSettings(roomId) {
   return roomSettings.get(roomId);
 }
 
+// Get location from IP address
+function getLocationFromIP(ip) {
+  // Handle localhost and private IPs
+  if (!ip || ip === '127.0.0.1' || ip === '::1' || ip.startsWith('192.168.') || ip.startsWith('10.')) {
+    return null;
+  }
+
+  // Remove IPv6 prefix if present (::ffff:xxx.xxx.xxx.xxx)
+  const cleanIp = ip.replace(/^::ffff:/, '');
+
+  const geo = geoip.lookup(cleanIp);
+  if (!geo) return null;
+
+  // Format location as "City, Country" or just "Country" if no city
+  const parts = [];
+  if (geo.city) parts.push(geo.city);
+  if (geo.country) parts.push(geo.country);
+
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
 // Get user list for a room
 function getUserList(roomId) {
   if (!rooms.has(roomId)) return [];
-  return Array.from(rooms.get(roomId).values()).map(u => ({ id: u.id, name: u.name }));
+  return Array.from(rooms.get(roomId).values()).map(u => ({
+    id: u.id,
+    name: u.name,
+    location: u.location
+  }));
 }
 
 // Broadcast user list to all in room
@@ -82,6 +108,12 @@ io.on('connection', (socket) => {
     userName = name || 'Anonymous';
     socket.join(roomId);
 
+    // Get user's IP address and location
+    const ip = socket.handshake.headers['x-forwarded-for']?.split(',')[0].trim() ||
+               socket.handshake.address;
+    const location = getLocationFromIP(ip);
+    console.log(`User ${clientId} connecting from IP ${ip}, location: ${location || 'unknown'}`);
+
     // Track socket -> client mapping
     socketClients.set(socket.id, { clientId, roomId });
 
@@ -98,6 +130,7 @@ io.on('connection', (socket) => {
       const oldSocketId = existingUser.socketId;
       existingUser.socketId = socket.id;
       existingUser.name = userName;
+      existingUser.location = location;
 
       // Clean up old socket mapping if it exists
       if (oldSocketId && oldSocketId !== socket.id) {
@@ -112,7 +145,7 @@ io.on('connection', (socket) => {
       console.log(`User ${clientId} (${userName}) reconnected to room "${roomId}" (${room.size} users)`);
     } else {
       // New user joining
-      room.set(clientId, { id: clientId, name: userName, socketId: socket.id });
+      room.set(clientId, { id: clientId, name: userName, socketId: socket.id, location });
       console.log(`User ${clientId} (${userName}) joined room "${roomId}" (${room.size} users)`);
     }
 
