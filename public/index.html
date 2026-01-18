@@ -42,6 +42,21 @@
         <!-- Users populated by JavaScript -->
       </ul>
     </div>
+
+    <div class="sync-section">
+      <h2>Sync Settings</h2>
+      <p class="sync-description">Enable sync to hear all players at the same time. Higher latency = better sync but slower response.</p>
+      <div class="sync-controls">
+        <label class="sync-toggle">
+          <input type="checkbox" id="syncEnabled" checked>
+          <span>Synchronized playback</span>
+        </label>
+        <div class="latency-control">
+          <label for="syncLatency">Latency: <span id="syncLatencyValue">200ms</span></label>
+          <input type="range" id="syncLatency" min="50" max="500" step="25" value="200">
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>

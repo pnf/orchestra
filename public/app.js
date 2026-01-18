@@ -52,10 +52,21 @@ const KEY_MAP = {
   '9': 'C#5', '0': 'D#5', '=': 'F#5',
 };
 
+// Get or create persistent client ID
+function getClientId() {
+  let clientId = localStorage.getItem('orchestra-client-id');
+  if (!clientId) {
+    clientId = 'client-' + Math.random().toString(36).substr(2, 9);
+    localStorage.setItem('orchestra-client-id', clientId);
+  }
+  return clientId;
+}
+
 // State
 let sampler = null;
 let socket = null;
 let myUserId = null;
+let myClientId = getClientId();
 let sustainActive = false;
 let sustainedNotes = new Set();
 let activeKeys = new Set();
@@ -64,6 +75,11 @@ let users = []; // List of users in the room
 let userVolumes = new Map(); // userId -> volume (0-1)
 let playingUsers = new Set(); // Set of userIds currently playing
 
+// Time sync state
+let serverTimeOffset = 0; // local time - server time (positive = local is ahead)
+let syncLatency = 200; // ms to delay all playback for synchronization
+let syncEnabled = true; // whether to use synchronized playback
+
 // DOM elements
 const pianoEl = document.getElementById('piano');
 const loadingEl = document.getElementById('loading');
@@ -71,6 +87,9 @@ const shareUrlEl = document.getElementById('shareUrl');
 const copyBtnEl = document.getElementById('copyBtn');
 const userNameEl = document.getElementById('userName');
 const userListEl = document.getElementById('userList');
+const syncLatencyEl = document.getElementById('syncLatency');
+const syncLatencyValueEl = document.getElementById('syncLatencyValue');
+const syncEnabledEl = document.getElementById('syncEnabled');
 
 // Initialize
 async function init() {
@@ -78,8 +97,114 @@ async function init() {
   setupKeyboardListeners();
   setupShareLink();
   setupNameInput();
+  setupSyncControls();
   await initAudio();
   connectSocket();
+}
+
+// Setup sync controls - settings are shared across room
+function setupSyncControls() {
+  // Initialize UI with defaults (will be updated when roomSettings arrives)
+  if (syncLatencyEl) {
+    syncLatencyEl.value = syncLatency;
+    syncLatencyValueEl.textContent = syncLatency + 'ms';
+
+    // Debounce latency changes to avoid spamming server
+    let latencyTimeout = null;
+    syncLatencyEl.addEventListener('input', () => {
+      syncLatency = parseInt(syncLatencyEl.value);
+      syncLatencyValueEl.textContent = syncLatency + 'ms';
+
+      // Broadcast to room after short delay
+      clearTimeout(latencyTimeout);
+      latencyTimeout = setTimeout(() => {
+        if (socket && socket.connected) {
+          socket.emit('setSyncLatency', syncLatency);
+        }
+      }, 100);
+    });
+  }
+
+  if (syncEnabledEl) {
+    syncEnabledEl.checked = syncEnabled;
+
+    syncEnabledEl.addEventListener('change', () => {
+      syncEnabled = syncEnabledEl.checked;
+      if (socket && socket.connected) {
+        socket.emit('setSyncEnabled', syncEnabled);
+      }
+    });
+  }
+}
+
+// Update UI when room settings are received from server
+function applyRoomSettings(settings) {
+  syncLatency = settings.syncLatency;
+  syncEnabled = settings.syncEnabled;
+
+  if (syncLatencyEl) {
+    syncLatencyEl.value = syncLatency;
+    syncLatencyValueEl.textContent = syncLatency + 'ms';
+  }
+
+  if (syncEnabledEl) {
+    syncEnabledEl.checked = syncEnabled;
+  }
+
+  console.log(`Room settings applied: latency=${syncLatency}ms, enabled=${syncEnabled}`);
+}
+
+// Sync time with server (average multiple pings for accuracy)
+async function syncTimeWithServer() {
+  if (!socket || !socket.connected) return;
+
+  const samples = [];
+  const numSamples = 5;
+
+  for (let i = 0; i < numSamples; i++) {
+    const offset = await measureTimeOffset();
+    if (offset !== null) {
+      samples.push(offset);
+    }
+    await new Promise(r => setTimeout(r, 50));
+  }
+
+  if (samples.length > 0) {
+    // Use median to avoid outliers
+    samples.sort((a, b) => a - b);
+    serverTimeOffset = samples[Math.floor(samples.length / 2)];
+    console.log(`Time sync: offset = ${serverTimeOffset}ms (${samples.length} samples)`);
+  }
+}
+
+// Measure single time offset
+function measureTimeOffset() {
+  return new Promise((resolve) => {
+    const clientSendTime = Date.now();
+    socket.emit('timeSync', clientSendTime, (response) => {
+      const clientReceiveTime = Date.now();
+      const roundTrip = clientReceiveTime - clientSendTime;
+      // Estimate server time at midpoint of round trip
+      const estimatedServerTime = response.serverTime + roundTrip / 2;
+      const offset = clientReceiveTime - estimatedServerTime;
+      resolve(offset);
+    });
+  });
+}
+
+// Convert server timestamp to local scheduled time
+function serverTimeToLocal(serverTime) {
+  return serverTime + serverTimeOffset + syncLatency;
+}
+
+// Schedule a function to run at a specific local time
+function scheduleAt(localTime, fn) {
+  const delay = localTime - Date.now();
+  if (delay <= 0) {
+    fn();
+  } else {
+    setTimeout(fn, delay);
+  }
 }
 
 // Build piano keyboard
@@ -164,7 +289,14 @@ function setupNameInput() {
     const name = userNameEl.value.trim() || 'Anonymous';
     localStorage.setItem('orchestra-name', name);
 
-    // Debounce to avoid spamming server
+    // Update local user list immediately for responsive feedback
+    const myUser = users.find(u => u.id === myUserId);
+    if (myUser) {
+      myUser.name = name;
+      renderUserList();
+    }
+
+    // Debounce server update to avoid spamming
     clearTimeout(nameTimeout);
     nameTimeout = setTimeout(() => {
       if (socket && socket.connected) {
@@ -185,7 +317,7 @@ function setUserVolume(userId, volume) {
 }
 
 // Start playing a note
-function startNote(note, isRemote = false, remoteUserId = null) {
+function startNote(note, isRemote = false, remoteUserId = null, timestamp = null) {
   if (!isRemote && activeKeys.has(note)) return;
 
   const keyEl = pianoEl.querySelector(`[data-note="${note}"]`);
@@ -195,28 +327,52 @@ function startNote(note, isRemote = false, remoteUserId = null) {
       remoteActiveNotes.set(note, new Set());
     }
     remoteActiveNotes.get(note).add(remoteUserId);
-    keyEl?.classList.add('remote');
 
-    // Mark user as playing
-    setUserPlaying(remoteUserId, true);
+    // Schedule visual feedback to match audio timing
+    if (syncEnabled && timestamp) {
+      scheduleAt(serverTimeToLocal(timestamp), () => {
+        keyEl?.classList.add('remote');
+        setUserPlaying(remoteUserId, true);
+      });
+    } else {
+      keyEl?.classList.add('remote');
+      setUserPlaying(remoteUserId, true);
+    }
   } else {
     activeKeys.add(note);
-    keyEl?.classList.add('active');
 
     if (socket && socket.connected) {
       socket.emit('noteOn', { note, velocity: 0.8 });
     }
+
+    // In sync mode, don't show visual or play locally - wait for server echo
+    if (syncEnabled) {
+      return;
+    }
+
+    keyEl?.classList.add('active');
   }
 
-  // Play sound with appropriate volume
-  if (sampler && Tone.context.state === 'running') {
-    const volume = isRemote ? getUserVolume(remoteUserId) : 1.0;
+  // Play sound (possibly scheduled)
+  playNoteSound(note, isRemote ? getUserVolume(remoteUserId) : 1.0, timestamp);
+}
+
+// Play the actual sound, optionally scheduled
+function playNoteSound(note, volume, timestamp = null) {
+  if (!sampler || Tone.context.state !== 'running') return;
+
+  if (syncEnabled && timestamp) {
+    const playTime = serverTimeToLocal(timestamp);
+    scheduleAt(playTime, () => {
+      sampler.triggerAttack(note, Tone.now(), 0.8 * volume);
+    });
+  } else {
     sampler.triggerAttack(note, Tone.now(), 0.8 * volume);
   }
 }
 
 // Stop playing a note
-function endNote(note, isRemote = false, remoteUserId = null) {
+function endNote(note, isRemote = false, remoteUserId = null, timestamp = null) {
   const keyEl = pianoEl.querySelector(`[data-note="${note}"]`);
 
   if (isRemote) {
@@ -224,21 +380,37 @@ function endNote(note, isRemote = false, remoteUserId = null) {
       remoteActiveNotes.get(note).delete(remoteUserId);
       if (remoteActiveNotes.get(note).size === 0) {
         remoteActiveNotes.delete(note);
-        keyEl?.classList.remove('remote');
+
+        // Schedule visual feedback removal to match audio timing
+        if (syncEnabled && timestamp) {
+          scheduleAt(serverTimeToLocal(timestamp), () => {
+            keyEl?.classList.remove('remote');
+          });
+        } else {
+          keyEl?.classList.remove('remote');
+        }
 
         if (!activeKeys.has(note) && !sustainedNotes.has(note)) {
-          sampler?.triggerRelease(note);
+          releaseNoteSound(note, timestamp);
         }
       }
     }
 
-    // Check if user is still playing any notes
-    let stillPlaying = false;
-    remoteActiveNotes.forEach((users) => {
-      if (users.has(remoteUserId)) stillPlaying = true;
-    });
-    if (!stillPlaying) {
-      setUserPlaying(remoteUserId, false);
+    // Check if user is still playing any notes (also schedule this check when synced)
+    const checkStillPlaying = () => {
+      let stillPlaying = false;
+      remoteActiveNotes.forEach((users) => {
+        if (users.has(remoteUserId)) stillPlaying = true;
+      });
+      if (!stillPlaying) {
+        setUserPlaying(remoteUserId, false);
+      }
+    };
+
+    if (syncEnabled && timestamp) {
+      scheduleAt(serverTimeToLocal(timestamp), checkStillPlaying);
+    } else {
+      checkStillPlaying();
     }
   } else {
     activeKeys.delete(note);
@@ -248,14 +420,33 @@ function endNote(note, isRemote = false, remoteUserId = null) {
     } else {
       keyEl?.classList.remove('active');
 
-      if (!remoteActiveNotes.has(note)) {
-        sampler?.triggerRelease(note);
-      }
-
       if (socket && socket.connected) {
         socket.emit('noteOff', { note });
       }
+
+      // In sync mode, don't release locally - wait for server echo
+      if (syncEnabled) {
+        return;
+      }
+
+      if (!remoteActiveNotes.has(note)) {
+        sampler?.triggerRelease(note);
+      }
     }
+  }
+}
+
+// Release note sound, optionally scheduled
+function releaseNoteSound(note, timestamp = null) {
+  if (!sampler) return;
+
+  if (syncEnabled && timestamp) {
+    const playTime = serverTimeToLocal(timestamp);
+    scheduleAt(playTime, () => {
+      sampler.triggerRelease(note);
+    });
+  } else {
+    sampler.triggerRelease(note);
   }
 }
 
@@ -426,19 +617,31 @@ function releaseAllLocalNotes() {
 
 // Connect to Socket.io
 function connectSocket() {
-  socket = io();
-
   const roomId = window.location.pathname.slice(1);
-  const name = userNameEl.value.trim() || 'Anonymous';
+
+  socket = io({
+    reconnection: true,
+    reconnectionAttempts: 10,
+    reconnectionDelay: 1000,
+  });
+
+  function joinRoom() {
+    const name = userNameEl.value.trim() || 'Anonymous';
+    console.log(`Connected to server, joining room: "${roomId}" as "${name}" (clientId: ${myClientId})`);
+    socket.emit('join', { roomId, name, clientId: myClientId });
+  }
 
   socket.on('connect', () => {
-    console.log(`Connected to server, joining room: "${roomId}"`);
-    socket.emit('join', { roomId, name });
+    joinRoom();
+    // Sync time with server
+    syncTimeWithServer();
   });
 
   socket.on('yourId', (id) => {
     myUserId = id;
     console.log('My user ID:', myUserId);
+    // Re-render user list to show "(you)" correctly
+    renderUserList();
   });
 
   socket.on('userList', (userList) => {
@@ -446,12 +649,45 @@ function connectSocket() {
     renderUserList();
   });
 
+  // Room-level sync settings (shared across all users)
+  socket.on('roomSettings', (settings) => {
+    applyRoomSettings(settings);
+  });
+
+  // Remote user note events
   socket.on('noteOn', (data) => {
-    startNote(data.note, true, data.userId);
+    startNote(data.note, true, data.userId, data.timestamp);
   });
 
   socket.on('noteOff', (data) => {
-    endNote(data.note, true, data.userId);
+    endNote(data.note, true, data.userId, data.timestamp);
+  });
+
+  // Local note echoes (for synchronized playback)
+  socket.on('noteOnSelf', (data) => {
+    if (syncEnabled) {
+      const keyEl = pianoEl.querySelector(`[data-note="${data.note}"]`);
+      // Schedule both visual and audio together
+      scheduleAt(serverTimeToLocal(data.timestamp), () => {
+        keyEl?.classList.add('active');
+        if (sampler && Tone.context.state === 'running') {
+          sampler.triggerAttack(data.note, Tone.now(), 0.8);
+        }
+      });
+    }
+  });
+
+  socket.on('noteOffSelf', (data) => {
+    if (syncEnabled) {
+      const keyEl = pianoEl.querySelector(`[data-note="${data.note}"]`);
+      // Schedule visual feedback removal to match audio timing
+      scheduleAt(serverTimeToLocal(data.timestamp), () => {
+        keyEl?.classList.remove('active');
+        if (!remoteActiveNotes.has(data.note)) {
+          sampler?.triggerRelease(data.note);
+        }
+      });
+    }
   });
 
   socket.on('userLeft', (data) => {
@@ -460,6 +696,12 @@ function connectSocket() {
 
   socket.on('disconnect', () => {
     console.log('Disconnected from server');
+  });
+
+  socket.on('reconnect', () => {
+    console.log('Reconnected to server');
+    // Re-sync time after reconnection
+    syncTimeWithServer();
   });
 }
 
