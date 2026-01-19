@@ -8,7 +8,9 @@ A collaborative real-time piano web application where multiple users can play mu
 - **Two-octave keyboard**: Playable via mouse/touch or computer keyboard
 - **Sustain pedal**: Hold Shift to sustain notes for chords
 - **User names**: Set your display name (saved in browser)
+- **Location display**: See city/country for each player (based on IP geolocation)
 - **Per-user volume**: Adjust volume for each remote player
+- **Synchronized playback**: Configurable latency buffering for tighter timing across players
 - **Visual feedback**: See which keys other users are playing (highlighted in blue)
 
 ## Keyboard Layout
@@ -69,35 +71,149 @@ npm start
 
 ## Deployment to Fly.io
 
+### Prerequisites
+
+1. Install the Fly CLI:
+   ```bash
+   # macOS
+   brew install flyctl
+
+   # Linux
+   curl -L https://fly.io/install.sh | sh
+
+   # Windows
+   iwr https://fly.io/install.ps1 -useb | iex
+   ```
+
+2. Create a Fly.io account and login:
+   ```bash
+   fly auth login
+   ```
+
+### Initial Setup
+
+1. Create a new Fly app:
+   ```bash
+   fly apps create your-app-name
+   ```
+
+2. Ensure your `fly.toml` has the correct configuration:
+   ```toml
+   app = 'your-app-name'
+   primary_region = 'sjc'  # Choose your preferred region
+
+   [build]
+
+   [env]
+     PORT = '8080'
+
+   [http_service]
+     internal_port = 8080
+     force_https = true
+     auto_stop_machines = 'off'
+     auto_start_machines = true
+     min_machines_running = 1
+     max_machines_running = 1
+
+   [[vm]]
+     memory = '512mb'
+     cpu_kind = 'shared'
+     cpus = 1
+   ```
+
+### Memory Requirements
+
+⚠️ **Important**: This app uses `geoip-lite` for IP geolocation, which loads a ~140MB database into memory. The default Fly.io machine (256MB) is too small and will cause OOM (Out of Memory) errors.
+
+**Required memory: 512MB minimum**
+
+To set or update memory allocation:
 ```bash
-# Install Fly CLI
-brew install flyctl
+fly scale memory 512
+```
 
-# Login to Fly
-fly auth login
+### Single Machine Requirement
 
-# Create app (first time only)
-fly apps create orchestra-piano
+Socket.io requires sticky sessions for WebSocket connections. This app runs on a single Fly.io machine to avoid load balancing issues.
 
-# Deploy
+**If you have multiple machines running**, scale down to one:
+```bash
+fly scale count 1
+```
+
+To scale beyond one machine in the future, you would need to add a Redis adapter for Socket.io session sharing.
+
+### Deployment
+
+Deploy your app:
+```bash
 fly deploy
+```
 
-# View logs
+The build process will:
+1. Create a Docker container from the Dockerfile
+2. Install Node.js dependencies (including geoip-lite)
+3. Push the image to Fly's registry
+4. Deploy to your machine
+
+### Monitoring
+
+View real-time logs:
+```bash
 fly logs
 ```
 
-### Important: Single Machine Requirement
-
-Socket.io requires sticky sessions or shared state across machines. For simplicity, this app runs on a single Fly.io machine:
-
-```toml
-# fly.toml
-[http_service]
-  min_machines_running = 1
-  max_machines_running = 1
+Check app status:
+```bash
+fly status
 ```
 
-To scale beyond one machine, add a Redis adapter for Socket.io.
+View machine details:
+```bash
+fly machine list
+```
+
+Monitor resource usage:
+```bash
+fly dashboard
+```
+
+### Troubleshooting
+
+**App crashes with "Out of memory" errors:**
+- Ensure memory is scaled to at least 512MB: `fly scale memory 512`
+- Check current memory: `fly scale show`
+
+**WebSocket connections failing:**
+- Verify only 1 machine is running: `fly scale count 1`
+- Check logs for connection errors: `fly logs`
+
+**App not responding:**
+- Restart the machine: `fly machine restart <machine-id>`
+- Check machine status: `fly status`
+
+**DNS/SSL issues:**
+- Verify DNS: `fly ips list`
+- Force HTTPS is enabled in fly.toml
+
+### Useful Commands
+
+```bash
+# SSH into the running machine
+fly ssh console
+
+# Restart the app
+fly apps restart
+
+# View app details
+fly info
+
+# Open app in browser
+fly open
+
+# Destroy the app (careful!)
+fly apps destroy your-app-name
+```
 
 ## Limitations
 
