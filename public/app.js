@@ -63,16 +63,18 @@ function getClientId() {
 }
 
 // State
-let sampler = null;
+let samplers = {}; // instrument name -> Tone.js sampler
 let socket = null;
 let myUserId = null;
 let myClientId = getClientId();
+let myInstrument = 'piano'; // Current user's instrument
 let sustainActive = false;
 let sustainedNotes = new Set();
 let activeKeys = new Set();
 let remoteActiveNotes = new Map(); // note -> Set of userIds
 let users = []; // List of users in the room
 let userVolumes = new Map(); // userId -> volume (0-1)
+let userInstruments = new Map(); // userId -> instrument name
 let playingUsers = new Set(); // Set of userIds currently playing
 
 // Time sync state
@@ -86,6 +88,7 @@ const loadingEl = document.getElementById('loading');
 const shareUrlEl = document.getElementById('shareUrl');
 const copyBtnEl = document.getElementById('copyBtn');
 const userNameEl = document.getElementById('userName');
+const userInstrumentEl = document.getElementById('userInstrument');
 const userListEl = document.getElementById('userList');
 const syncLatencyEl = document.getElementById('syncLatency');
 const syncLatencyValueEl = document.getElementById('syncLatencyValue');
@@ -97,6 +100,7 @@ async function init() {
   setupKeyboardListeners();
   setupShareLink();
   setupNameInput();
+  setupInstrumentInput();
   setupSyncControls();
   await initAudio();
   connectSocket();
@@ -239,20 +243,113 @@ function buildPiano() {
 
 // Initialize audio with Tone.js
 async function initAudio() {
-  const baseUrl = 'https://tonejs.github.io/audio/salamander/';
+  const instrumentsBaseUrl = 'https://nbrosowsky.github.io/tonejs-instruments/samples/';
 
-  sampler = new Tone.Sampler({
+  let loadedCount = 0;
+  const totalInstruments = 5;
+
+  const checkAllLoaded = () => {
+    loadedCount++;
+    console.log(`Instrument loading progress: ${loadedCount}/${totalInstruments}`);
+    if (loadedCount === totalInstruments) {
+      loadingEl.classList.add('hidden');
+      console.log('All instruments loaded (or failed gracefully)');
+    }
+  };
+
+  // Piano - Salamander Grand Piano samples
+  const pianoBaseUrl = 'https://tonejs.github.io/audio/salamander/';
+  samplers.piano = new Tone.Sampler({
     urls: {
       'C3': 'C3.mp3', 'D#3': 'Ds3.mp3', 'F#3': 'Fs3.mp3', 'A3': 'A3.mp3',
       'C4': 'C4.mp3', 'D#4': 'Ds4.mp3', 'F#4': 'Fs4.mp3', 'A4': 'A4.mp3',
       'C5': 'C5.mp3', 'D#5': 'Ds5.mp3', 'F#5': 'Fs5.mp3',
     },
-    baseUrl: baseUrl,
+    baseUrl: pianoBaseUrl,
     release: 1,
-    onload: () => {
-      loadingEl.classList.add('hidden');
-      console.log('Piano samples loaded');
-    }
+    onload: checkAllLoaded
+  }).toDestination();
+
+  // Guitar - Acoustic guitar samples
+  samplers.guitar = new Tone.Sampler({
+    urls: {
+      'A2': 'A2.mp3',
+      'A3': 'A3.mp3',
+      'A4': 'A4.mp3',
+      'C3': 'C3.mp3',
+      'C4': 'C4.mp3',
+      'C5': 'C5.mp3',
+      'D#2': 'Ds2.mp3',
+      'D#3': 'Ds3.mp3',
+      'D#4': 'Ds4.mp3',
+      'F#2': 'Fs2.mp3',
+      'F#3': 'Fs3.mp3',
+      'F#4': 'Fs4.mp3'
+    },
+    baseUrl: instrumentsBaseUrl + 'guitar-acoustic/',
+    release: 1,
+    onload: checkAllLoaded
+  }).toDestination();
+
+  // Bass - Electric bass samples
+  samplers.bass = new Tone.Sampler({
+    urls: {
+      'A#1': 'As1.mp3',
+      'A#2': 'As2.mp3',
+      'A#3': 'As3.mp3',
+      'C#1': 'Cs1.mp3',
+      'C#2': 'Cs2.mp3',
+      'C#3': 'Cs3.mp3',
+      'E1': 'E1.mp3',
+      'E2': 'E2.mp3',
+      'E3': 'E3.mp3',
+      'G1': 'G1.mp3',
+      'G2': 'G2.mp3',
+      'G3': 'G3.mp3'
+    },
+    baseUrl: instrumentsBaseUrl + 'bass-electric/',
+    release: 1,
+    onload: checkAllLoaded
+  }).toDestination();
+
+  // Synth - Using saxophone as a unique melodic sound
+  samplers.synth = new Tone.Sampler({
+    urls: {
+      'C4': 'C4.mp3',
+      'C5': 'C5.mp3',
+      'D#3': 'Ds3.mp3',
+      'D#4': 'Ds4.mp3',
+      'D#5': 'Ds5.mp3',
+      'F#3': 'Fs3.mp3',
+      'F#4': 'Fs4.mp3',
+      'F#5': 'Fs5.mp3',
+      'A4': 'A4.mp3',
+      'A5': 'A5.mp3'
+    },
+    baseUrl: instrumentsBaseUrl + 'saxophone/',
+    release: 1,
+    onload: checkAllLoaded
+  }).toDestination();
+
+  // Organ - Harmonium samples
+  samplers.organ = new Tone.Sampler({
+    urls: {
+      'C2': 'C2.mp3',
+      'C3': 'C3.mp3',
+      'C4': 'C4.mp3',
+      'C5': 'C5.mp3',
+      'D#2': 'Ds2.mp3',
+      'D#3': 'Ds3.mp3',
+      'D#4': 'Ds4.mp3',
+      'F#2': 'Fs2.mp3',
+      'F#3': 'Fs3.mp3',
+      'A2': 'A2.mp3',
+      'A3': 'A3.mp3',
+      'A4': 'A4.mp3'
+    },
+    baseUrl: instrumentsBaseUrl + 'harmonium/',
+    release: 1,
+    onload: checkAllLoaded
   }).toDestination();
 
   // Start audio context on user interaction (iOS requirement)
@@ -306,6 +403,36 @@ function setupNameInput() {
   });
 }
 
+// Setup instrument input
+function setupInstrumentInput() {
+  // Load saved instrument from localStorage
+  const savedInstrument = localStorage.getItem('orchestra-instrument');
+  if (savedInstrument && samplers[savedInstrument]) {
+    myInstrument = savedInstrument;
+    userInstrumentEl.value = savedInstrument;
+  }
+
+  // Send instrument changes to server
+  userInstrumentEl.addEventListener('change', () => {
+    myInstrument = userInstrumentEl.value;
+    localStorage.setItem('orchestra-instrument', myInstrument);
+
+    // Update local user list immediately
+    const myUser = users.find(u => u.id === myUserId);
+    if (myUser) {
+      myUser.instrument = myInstrument;
+      renderUserList();
+    }
+
+    // Send to server
+    if (socket && socket.connected) {
+      socket.emit('setInstrument', myInstrument);
+    }
+
+    console.log(`Instrument changed to: ${myInstrument}`);
+  });
+}
+
 // Get user volume (default 1.0)
 function getUserVolume(userId) {
   return userVolumes.get(userId) ?? 1.0;
@@ -354,12 +481,18 @@ function startNote(note, isRemote = false, remoteUserId = null, timestamp = null
   }
 
   // Play sound (possibly scheduled)
-  playNoteSound(note, isRemote ? getUserVolume(remoteUserId) : 1.0, timestamp);
+  playNoteSound(note, isRemote ? getUserVolume(remoteUserId) : 1.0, timestamp, isRemote ? remoteUserId : myUserId);
 }
 
 // Play the actual sound, optionally scheduled
-function playNoteSound(note, volume, timestamp = null) {
-  if (!sampler || Tone.context.state !== 'running') return;
+function playNoteSound(note, volume, timestamp = null, userId = null) {
+  if (Tone.context.state !== 'running') return;
+
+  // Get instrument for this user (default to piano if not found)
+  const instrument = userId ? (userInstruments.get(userId) || myInstrument) : myInstrument;
+  const sampler = samplers[instrument] || samplers.piano;
+
+  if (!sampler) return;
 
   if (syncEnabled && timestamp) {
     const playTime = serverTimeToLocal(timestamp);
@@ -430,7 +563,8 @@ function endNote(note, isRemote = false, remoteUserId = null, timestamp = null) 
       }
 
       if (!remoteActiveNotes.has(note)) {
-        sampler?.triggerRelease(note);
+        // Release on all instruments to ensure note stops
+        Object.values(samplers).forEach(s => s?.triggerRelease && s.triggerRelease(note));
       }
     }
   }
@@ -438,15 +572,15 @@ function endNote(note, isRemote = false, remoteUserId = null, timestamp = null) 
 
 // Release note sound, optionally scheduled
 function releaseNoteSound(note, timestamp = null) {
-  if (!sampler) return;
-
   if (syncEnabled && timestamp) {
     const playTime = serverTimeToLocal(timestamp);
     scheduleAt(playTime, () => {
-      sampler.triggerRelease(note);
+      // Release on all instruments to ensure note stops
+      Object.values(samplers).forEach(s => s?.triggerRelease && s.triggerRelease(note));
     });
   } else {
-    sampler.triggerRelease(note);
+    // Release on all instruments to ensure note stops
+    Object.values(samplers).forEach(s => s?.triggerRelease && s.triggerRelease(note));
   }
 }
 
@@ -457,7 +591,8 @@ function releaseSustain() {
     keyEl?.classList.remove('active');
 
     if (!remoteActiveNotes.has(note)) {
-      sampler?.triggerRelease(note);
+      // Release on all instruments to ensure note stops
+      Object.values(samplers).forEach(s => s?.triggerRelease && s.triggerRelease(note));
     }
 
     if (socket && socket.connected) {
@@ -535,10 +670,13 @@ function renderUserList() {
     const nameSpan = document.createElement('span');
     nameSpan.className = 'user-name';
 
-    // Build display name with location
+    // Build display name with location and instrument
     let displayText = user.name + (user.id === myUserId ? ' (you)' : '');
     if (user.location) {
       displayText += ` • ${user.location}`;
+    }
+    if (user.instrument) {
+      displayText += ` • ${user.instrument}`;
     }
     nameSpan.textContent = displayText;
 
@@ -634,7 +772,7 @@ function connectSocket() {
   function joinRoom() {
     const name = userNameEl.value.trim() || 'Anonymous';
     console.log(`Connected to server, joining room: "${roomId}" as "${name}" (clientId: ${myClientId})`);
-    socket.emit('join', { roomId, name, clientId: myClientId });
+    socket.emit('join', { roomId, name, clientId: myClientId, instrument: myInstrument });
   }
 
   socket.on('connect', () => {
@@ -652,6 +790,12 @@ function connectSocket() {
 
   socket.on('userList', (userList) => {
     users = userList;
+    // Update instrument mapping
+    userList.forEach(user => {
+      if (user.instrument) {
+        userInstruments.set(user.id, user.instrument);
+      }
+    });
     renderUserList();
   });
 
@@ -673,6 +817,7 @@ function connectSocket() {
   socket.on('noteOnSelf', (data) => {
     if (syncEnabled) {
       const keyEl = pianoEl.querySelector(`[data-note="${data.note}"]`);
+      const sampler = samplers[myInstrument] || samplers.piano;
       // Schedule both visual and audio together
       scheduleAt(serverTimeToLocal(data.timestamp), () => {
         keyEl?.classList.add('active');
@@ -690,10 +835,22 @@ function connectSocket() {
       scheduleAt(serverTimeToLocal(data.timestamp), () => {
         keyEl?.classList.remove('active');
         if (!remoteActiveNotes.has(data.note)) {
-          sampler?.triggerRelease(data.note);
+          // Release on all instruments to ensure note stops
+          Object.values(samplers).forEach(s => s?.triggerRelease && s.triggerRelease(data.note));
         }
       });
     }
+  });
+
+  // User instrument changed
+  socket.on('userInstrument', (data) => {
+    userInstruments.set(data.userId, data.instrument);
+    const user = users.find(u => u.id === data.userId);
+    if (user) {
+      user.instrument = data.instrument;
+      renderUserList();
+    }
+    console.log(`User ${data.userId} changed instrument to ${data.instrument}`);
   });
 
   socket.on('userLeft', (data) => {

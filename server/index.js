@@ -67,7 +67,8 @@ function getUserList(roomId) {
   return Array.from(rooms.get(roomId).values()).map(u => ({
     id: u.id,
     name: u.name,
-    location: u.location
+    location: u.location,
+    instrument: u.instrument || 'piano'
   }));
 }
 
@@ -81,6 +82,7 @@ io.on('connection', (socket) => {
   let currentRoom = null;
   let clientId = null;
   let userName = 'Anonymous';
+  let userInstrument = 'piano';
 
   // Time sync: client sends request, server responds with server time
   socket.on('timeSync', (clientTime, callback) => {
@@ -95,6 +97,7 @@ io.on('connection', (socket) => {
     const roomId = typeof data === 'string' ? data : data.roomId;
     const name = typeof data === 'object' ? data.name : 'Anonymous';
     const incomingClientId = typeof data === 'object' ? data.clientId : null;
+    const instrument = typeof data === 'object' ? (data.instrument || 'piano') : 'piano';
 
     // Validate room ID
     if (!roomId || roomId === 'null' || roomId === 'undefined') {
@@ -106,6 +109,7 @@ io.on('connection', (socket) => {
     clientId = incomingClientId || nanoid(6);
     currentRoom = roomId;
     userName = name || 'Anonymous';
+    userInstrument = instrument;
     socket.join(roomId);
 
     // Get user's IP address and location
@@ -131,6 +135,7 @@ io.on('connection', (socket) => {
       existingUser.socketId = socket.id;
       existingUser.name = userName;
       existingUser.location = location;
+      existingUser.instrument = userInstrument;
 
       // Clean up old socket mapping if it exists
       if (oldSocketId && oldSocketId !== socket.id) {
@@ -145,7 +150,7 @@ io.on('connection', (socket) => {
       console.log(`User ${clientId} (${userName}) reconnected to room "${roomId}" (${room.size} users)`);
     } else {
       // New user joining
-      room.set(clientId, { id: clientId, name: userName, socketId: socket.id, location });
+      room.set(clientId, { id: clientId, name: userName, socketId: socket.id, location, instrument: userInstrument });
       console.log(`User ${clientId} (${userName}) joined room "${roomId}" (${room.size} users)`);
     }
 
@@ -189,6 +194,22 @@ io.on('connection', (socket) => {
       }
     }
     console.log(`User ${clientId} changed name to "${userName}"`);
+  });
+
+  socket.on('setInstrument', (instrument) => {
+    userInstrument = instrument || 'piano';
+    if (currentRoom && rooms.has(currentRoom) && clientId) {
+      const user = rooms.get(currentRoom).get(clientId);
+      if (user) {
+        user.instrument = userInstrument;
+        // Broadcast instrument change to all users in room
+        io.to(currentRoom).emit('userInstrument', {
+          userId: clientId,
+          instrument: userInstrument
+        });
+      }
+    }
+    console.log(`User ${clientId} changed instrument to "${userInstrument}"`);
   });
 
   socket.on('noteOn', (data) => {
@@ -259,6 +280,6 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on http://0.0.0.0:${PORT}`);
 });
