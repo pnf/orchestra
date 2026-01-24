@@ -3,7 +3,23 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const { nanoid } = require('nanoid');
-const geoip = require('geoip-lite');
+
+// Make geoip-lite optional to save memory (uses ~150MB)
+// Set DISABLE_GEOIP=1 to disable IP-based geolocation
+let geoip = null;
+if (process.env.DISABLE_GEOIP !== '1') {
+  try {
+    console.log('Loading geoip-lite database...');
+    const memBefore = process.memoryUsage();
+    geoip = require('geoip-lite');
+    const memAfter = process.memoryUsage();
+    console.log(`geoip-lite loaded (added ${Math.round((memAfter.rss - memBefore.rss) / 1024 / 1024)}MB)`);
+  } catch (err) {
+    console.warn('geoip-lite not available, IP geolocation disabled:', err.message);
+  }
+} else {
+  console.log('IP-based geolocation disabled (DISABLE_GEOIP=1)');
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -42,6 +58,11 @@ function getRoomSettings(roomId) {
 
 // Get location from IP address
 function getLocationFromIP(ip) {
+  // If geoip is disabled or not available, return null
+  if (!geoip) {
+    return null;
+  }
+
   // Handle localhost and private IPs
   if (!ip || ip === '127.0.0.1' || ip === '::1' || ip.startsWith('192.168.') || ip.startsWith('10.')) {
     return null;
@@ -98,6 +119,7 @@ io.on('connection', (socket) => {
     const name = typeof data === 'object' ? data.name : 'Anonymous';
     const incomingClientId = typeof data === 'object' ? data.clientId : null;
     const instrument = typeof data === 'object' ? (data.instrument || 'piano') : 'piano';
+    const browserLocation = typeof data === 'object' ? data.location : null;
 
     // Validate room ID
     if (!roomId || roomId === 'null' || roomId === 'undefined') {
@@ -112,11 +134,22 @@ io.on('connection', (socket) => {
     userInstrument = instrument;
     socket.join(roomId);
 
-    // Get user's IP address and location
-    const ip = socket.handshake.headers['x-forwarded-for']?.split(',')[0].trim() ||
-               socket.handshake.address;
-    const location = getLocationFromIP(ip);
-    console.log(`User ${clientId} connecting from IP ${ip}, location: ${location || 'unknown'}`);
+    // Prefer browser location, fall back to IP
+    let location;
+    let locationSource;
+
+    if (browserLocation) {
+      location = browserLocation;
+      locationSource = 'browser';
+    } else {
+      const ip = socket.handshake.headers['x-forwarded-for']?.split(',')[0].trim() ||
+                 socket.handshake.address;
+      location = getLocationFromIP(ip);
+      locationSource = 'ip';
+    }
+
+    console.log(`User ${clientId} connecting from ${locationSource}, location: ${location || 'unknown'}`);
+
 
     // Track socket -> client mapping
     socketClients.set(socket.id, { clientId, roomId });
@@ -194,6 +227,17 @@ io.on('connection', (socket) => {
       }
     }
     console.log(`User ${clientId} changed name to "${userName}"`);
+  });
+
+  socket.on('setLocation', (location) => {
+    if (currentRoom && rooms.has(currentRoom) && clientId) {
+      const user = rooms.get(currentRoom).get(clientId);
+      if (user) {
+        user.location = location;
+        broadcastUserList(currentRoom);
+        console.log(`User ${clientId} updated location to "${location}" (from browser)`);
+      }
+    }
   });
 
   socket.on('setInstrument', (instrument) => {
@@ -282,4 +326,25 @@ io.on('connection', (socket) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on http://0.0.0.0:${PORT}`);
+  console.log('Initial memory usage:', formatMemory(process.memoryUsage()));
+
+  // Log memory every 5 minutes
+  setInterval(() => {
+    const mem = process.memoryUsage();
+    console.log('Memory usage:', formatMemory(mem));
+
+    // Warn if RSS is over 400MB (leaving buffer before 512MB limit)
+    if (mem.rss > 400 * 1024 * 1024) {
+      console.warn('WARNING: High memory usage detected:', formatMemory(mem));
+    }
+  }, 5 * 60 * 1000);
 });
+
+function formatMemory(mem) {
+  return {
+    rss: `${Math.round(mem.rss / 1024 / 1024)}MB`,
+    heapTotal: `${Math.round(mem.heapTotal / 1024 / 1024)}MB`,
+    heapUsed: `${Math.round(mem.heapUsed / 1024 / 1024)}MB`,
+    external: `${Math.round(mem.external / 1024 / 1024)}MB`
+  };
+}

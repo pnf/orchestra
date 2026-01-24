@@ -62,6 +62,70 @@ function getClientId() {
   return clientId;
 }
 
+// Get browser-based geolocation
+async function getBrowserLocation() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      console.log('Geolocation not supported');
+      resolve(null);
+      return;
+    }
+
+    console.log('Requesting browser geolocation...');
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude, longitude } = position.coords;
+        console.log(`Got coordinates: ${latitude}, ${longitude}`);
+
+        try {
+          const location = await reverseGeocode(latitude, longitude);
+          console.log(`Reverse geocoded to: ${location}`);
+          resolve(location);
+        } catch (err) {
+          console.error('Reverse geocoding failed:', err);
+          resolve(null);
+        }
+      },
+      (error) => {
+        console.log(`Geolocation error: ${error.message} (code: ${error.code})`);
+        resolve(null);
+      },
+      {
+        timeout: 10000,
+        maximumAge: 300000,
+        enableHighAccuracy: false
+      }
+    );
+  });
+}
+
+// Reverse geocode coordinates to "City, Country" format
+async function reverseGeocode(lat, lon) {
+  const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`;
+
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Orchestra-Piano-App'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Reverse geocoding failed: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const address = data.address || {};
+  const city = address.city || address.town || address.village || address.county;
+  const country = address.country;
+
+  const parts = [];
+  if (city) parts.push(city);
+  if (country) parts.push(country);
+
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
 // State
 let samplers = {}; // instrument name -> Tone.js sampler
 let socket = null;
@@ -76,6 +140,8 @@ let users = []; // List of users in the room
 let userVolumes = new Map(); // userId -> volume (0-1)
 let userInstruments = new Map(); // userId -> instrument name
 let playingUsers = new Set(); // Set of userIds currently playing
+let myLocation = null; // Current user's location string
+let locationFromBrowser = false; // Whether location came from browser
 
 // Time sync state
 let serverTimeOffset = 0; // local time - server time (positive = local is ahead)
@@ -102,6 +168,21 @@ async function init() {
   setupNameInput();
   setupInstrumentInput();
   setupSyncControls();
+
+  // Get browser location (non-blocking, parallel with audio init)
+  getBrowserLocation().then(location => {
+    if (location) {
+      myLocation = location;
+      locationFromBrowser = true;
+      console.log(`Browser location obtained: ${location}`);
+
+      // If we're already connected, send location update to server
+      if (socket && socket.connected) {
+        socket.emit('setLocation', location);
+      }
+    }
+  });
+
   await initAudio();
   connectSocket();
 }
@@ -772,7 +853,7 @@ function connectSocket() {
   function joinRoom() {
     const name = userNameEl.value.trim() || 'Anonymous';
     console.log(`Connected to server, joining room: "${roomId}" as "${name}" (clientId: ${myClientId})`);
-    socket.emit('join', { roomId, name, clientId: myClientId, instrument: myInstrument });
+    socket.emit('join', { roomId, name, clientId: myClientId, instrument: myInstrument, location: myLocation });
   }
 
   socket.on('connect', () => {

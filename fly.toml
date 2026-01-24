@@ -11,6 +11,7 @@ primary_region = 'sjc'
 
 [env]
   PORT = '8080'
+  DISABLE_GEOIP = '1'  # Disable IP geolocation to save ~150MB memory (use browser geolocation instead)
 
 [http_service]
   internal_port = 8080
